@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# fake `claude` for the integration test: log the invocation, then run
+# fake_claude.py with argv[0] set to "claude" like the real binary
+printf '%s\n' "$*" >> "$VRS_TEST_DIR/claude-invocations"
+exec -a claude python3 "$(dirname "$0")/../fake_claude.py" "$@"
