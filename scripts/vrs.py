@@ -172,7 +172,7 @@ def data_dir():
         base = os.path.join(xdg, "vrs")
     socket_path, _ = server_info()
     path = os.path.join(base, os.path.basename(socket_path) or "default")
-    os.makedirs(path, exist_ok=True)
+    os.makedirs(path, mode=0o700, exist_ok=True)
     return path
 
 
@@ -208,8 +208,10 @@ def locked(name, blocking=True):
 
 
 def write_json_atomic(path, data):
+    """Write JSON readable only by the user (snapshots hold command lines)."""
     tmp = "%s.tmp.%d" % (path, os.getpid())
-    with open(tmp, "w") as fh:
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
         json.dump(data, fh, indent=1, ensure_ascii=False)
         fh.write("\n")
     os.replace(tmp, path)
@@ -284,7 +286,11 @@ def read_proc(pid):
 
 def scan_procs():
     procs = {}
-    for name in os.listdir("/proc"):
+    try:
+        names = os.listdir("/proc")
+    except OSError:
+        return procs  # no procfs: layouts and directories still work
+    for name in names:
         if name.isdigit():
             p = read_proc(int(name))
             if p:
@@ -527,8 +533,10 @@ def claude_from_argv(argv):
 
 def detect_claude(members):
     for p in members:
-        info, env_dir = claude_session_for(p)
         argv = proc_argv(p.pid)
+        if "-p" in argv or "--print" in argv:
+            continue  # one-shot print mode: nothing to resume
+        info, env_dir = claude_session_for(p)
         if info:
             return {
                 "session_id": info["sessionId"],
@@ -576,6 +584,7 @@ def claude_command(c):
 
 PANE_FIELDS = (
     "session_id", "session_name", "session_last_attached",
+    "session_grouped", "session_group",
     "window_id", "window_index", "window_name", "window_layout",
     "window_active", "window_last_flag", "window_zoomed_flag",
     "automatic-rename", "window_width", "window_height",
@@ -632,36 +641,59 @@ def capture_pane(pane, procs):
 
 
 def build_snapshot():
-    rows = tmux_rows("list-panes", "-a", "-F", fmt(*PANE_FIELDS))
+    rows = [dict(zip(PANE_FIELDS, row))
+            for row in tmux_rows("list-panes", "-a", "-F", fmt(*PANE_FIELDS))
+            if len(row) == len(PANE_FIELDS)]
     procs = scan_procs()
-    sessions, by_sid, by_wid = [], {}, {}
-    for row in rows:
-        if len(row) != len(PANE_FIELDS):
-            continue
-        r = dict(zip(PANE_FIELDS, row))
+    # grouped sessions share their windows: save them with the oldest session
+    leaders = {}
+    for r in rows:
+        if r["session_grouped"] == "1":
+            key = (as_int(r["session_id"].lstrip("$")), r["session_name"])
+            leaders[r["session_group"]] = min(leaders.get(r["session_group"], key), key)
+    sessions, by_sid = [], {}
+    owner = {}  # window id -> (session name, window) where it was saved first
+    for r in rows:
         s = by_sid.get(r["session_id"])
         if s is None:
             s = {"name": r["session_name"], "windows": [],
-                 "_last_attached": as_int(r["session_last_attached"])}
+                 "_last_attached": as_int(r["session_last_attached"]), "_wids": {}}
+            if r["session_grouped"] == "1":
+                leader = leaders[r["session_group"]][1]
+                if leader != r["session_name"]:
+                    s["group"] = leader  # shares the leader's windows
             by_sid[r["session_id"]] = s
             sessions.append(s)
-        w = by_wid.get(r["window_id"])
+        if "group" in s:
+            if r["window_active"] == "1":
+                s["active_window"] = as_int(r["window_index"])
+            continue
+        wid = r["window_id"]
+        w = s["_wids"].get(wid)
         if w is None:
             w = {
                 "index": as_int(r["window_index"]),
-                "name": r["window_name"],
-                "auto_rename": r["automatic-rename"] == "1",
-                "layout": r["window_layout"],
                 "active": r["window_active"] == "1",
                 "last": r["window_last_flag"] == "1",
-                "zoomed": r["window_zoomed_flag"] == "1",
-                "width": as_int(r["window_width"], 80),
-                "height": as_int(r["window_height"], 24),
-                "panes": [],
             }
-            by_wid[r["window_id"]] = w
+            if wid in owner:  # the same window linked into another session
+                src_name, src = owner[wid]
+                w["link"] = {"session": src_name, "index": src["index"]}
+            else:
+                w.update({
+                    "name": r["window_name"],
+                    "auto_rename": r["automatic-rename"] == "1",
+                    "layout": r["window_layout"],
+                    "zoomed": r["window_zoomed_flag"] == "1",
+                    "width": as_int(r["window_width"], 80),
+                    "height": as_int(r["window_height"], 24),
+                    "panes": [],
+                })
+                owner[wid] = (s["name"], w)
+            s["_wids"][wid] = w
             s["windows"].append(w)
-        w["panes"].append(capture_pane(r, procs))
+        if "link" not in w:
+            w["panes"].append(capture_pane(r, procs))
 
     # the session the user is in (most recently active client), and the one before
     active = last = None
@@ -675,7 +707,7 @@ def build_snapshot():
         active = ordered[0]["name"]
         last = ordered[1]["name"] if len(ordered) > 1 else None
     for s in sessions:
-        del s["_last_attached"]
+        del s["_last_attached"], s["_wids"]
     return {
         "version": SNAPSHOT_VERSION,
         "saved_at": datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -685,9 +717,13 @@ def build_snapshot():
     }
 
 
+def all_panes(snap):
+    return [p for s in snap["sessions"] for w in s["windows"] for p in w.get("panes", [])]
+
+
 def is_trivial(snap):
     """Nothing worth keeping: no sessions, or one idle shell."""
-    panes = [p for s in snap["sessions"] for w in s["windows"] for p in w["panes"]]
+    panes = all_panes(snap)
     if not panes:
         return True
     return len(panes) == 1 and not (panes[0].get("process") or panes[0].get("claude"))
@@ -743,7 +779,7 @@ def save(auto=False):
 def describe(snap):
     sessions = snap["sessions"]
     windows = sum(len(s["windows"]) for s in sessions)
-    panes = [p for s in sessions for w in s["windows"] for p in w["panes"]]
+    panes = all_panes(snap)
     claude = sum(1 for p in panes if p.get("claude"))
     procs = sum(1 for p in panes if p.get("process"))
     text = "%d sessions, %d windows, %d panes" % (len(sessions), windows, len(panes))
@@ -804,13 +840,17 @@ def split_pane(target, cwd, window):
         return tmux("split-window", "-d", "-t", target, "-c", cwd, "-P", "-F", out_fmt).strip()
 
 
-def restore_session(s, settings, plans):
+def restore_session(s, settings, plans, later):
+    """Create one saved session. Linked windows are queued in `later` and
+    linked once every session exists."""
     windows = sorted(s["windows"], key=lambda w: w["index"])
     out_fmt = fmt("session_id", "window_id", "pane_id", "window_index")
     sid = None
     active_wid = last_wid = None
     for w in windows:
-        panes = sorted(w["panes"], key=lambda p: p["index"])
+        if w.get("link"):
+            continue
+        panes = sorted(w.get("panes", []), key=lambda p: p["index"])
         if not panes:
             continue
         name_args = [] if w.get("auto_rename") else ["-n", w["name"]]
@@ -856,11 +896,28 @@ def restore_session(s, settings, plans):
             plan = plan_pane(p, settings)
             if plan:
                 plans.append((plan[0], pid, plan[1]))
+    if sid is None:  # nothing but linked windows: start with a placeholder
+        out = tmux("new-session", "-d", "-P", "-F", fmt("session_id", "window_id"), "-s", s["name"])
+        sid, placeholder = out.strip().split(SEP)
+        later["placeholders"].append(placeholder)
+    for w in windows:
+        if w.get("link"):
+            later["links"].append((sid, w))
     if last_wid:
         tmux_ok("select-window", "-t", last_wid)
     if active_wid:
         tmux_ok("select-window", "-t", active_wid)
     return sid
+
+
+def restore_links(later):
+    for sid, w in later["links"]:
+        src = "=%s:%d" % (w["link"]["session"], w["link"]["index"])
+        dst = "%s:%d" % (sid, w["index"])
+        if tmux_ok("link-window", "-d", "-s", src, "-t", dst) and w.get("active"):
+            tmux_ok("select-window", "-t", dst)
+    for wid in later["placeholders"]:
+        tmux_ok("kill-window", "-t", wid)
 
 
 def list_sessions():
@@ -919,16 +976,25 @@ def restore(path=None, auto_start=False):
                 tmux_ok("rename-session", "-t", pristine[0], "vrs-%d" % os.getpid())
                 current = list_sessions()
             names = {name for _, name, _ in current}
-            for s in snap["sessions"]:
+            later = {"links": [], "placeholders": []}
+            # sessions that own windows first, then the ones grouped with them
+            ordered = sorted(snap["sessions"], key=lambda s: bool(s.get("group")))
+            for s in ordered:
                 if s["name"] in names:
                     skipped.append(s["name"])
                     continue
                 try:
-                    restore_session(s, settings, plans)
+                    if s.get("group"):
+                        tmux("new-session", "-d", "-s", s["name"], "-t", "=" + s["group"])
+                        if "active_window" in s:
+                            tmux_ok("select-window", "-t", "=%s:%d" % (s["name"], s["active_window"]))
+                    else:
+                        restore_session(s, settings, plans, later)
                     restored.append(s["name"])
                 except TmuxError as exc:
                     failed.append("%s (%s)" % (s["name"], exc))
                     log_error("restore session %s" % s["name"])
+            restore_links(later)
 
             # leave the throwaway session the server started with
             names = {name for _, name, _ in list_sessions()}

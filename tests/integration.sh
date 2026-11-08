@@ -90,6 +90,10 @@ t new-window -t work:3 -c "$WORK/d d"
 t send-keys -t work:3.1 "claude --model opus --dangerously-skip-permissions 'fix the bug'" Enter
 t split-window -v -t work:3 -c "$WORK/a"
 t send-keys -t work:3.2 'claude --no-transcript' Enter
+t resize-pane -Z -t work:3.1
+t link-window -d -s misc:1 -t work:5
+t new-session -d -s view -t work
+t select-window -t view:2
 t select-window -t work:3
 t select-window -t work:1
 t select-pane -t work:1.1
@@ -122,11 +126,15 @@ def expect(desc, got, want):
     if got != want:
         fails.append("%s: expected %r, got %r" % (desc, want, got))
 s = {x["name"]: x for x in snap["sessions"]}
-expect("sessions", sorted(s), ["misc", "work"])
+expect("sessions", sorted(s), ["misc", "view", "work"])
+expect("grouped session", (s["view"].get("group"), s["view"].get("active_window"), s["view"]["windows"]),
+       ("work", 2, []))
 expect("active session", snap["active_session"], "work")
 expect("last session", snap["last_session"], "misc")
 w = {x["index"]: x for x in s["work"]["windows"]}
-expect("work windows", sorted(w), [1, 2, 3])
+expect("work windows", sorted(w), [1, 2, 3, 5])
+expect("linked window", w[5].get("link"), {"session": "misc", "index": 1})
+expect("zoomed", w[3]["zoomed"], True)
 expect("editor name", (w[2]["name"], w[2]["auto_rename"]), ("editor", False))
 expect("window 1 auto-named", w[1]["auto_rename"], True)
 p = w[1]["panes"]
@@ -163,11 +171,14 @@ sleep 0.5
 o new-session -d -s outer -x 160 -y 42 "env -u TMUX tmux -L $SOCK -f $WORK/tmux.conf"
 wait_for 't has-session -t work 2>/dev/null && ! t has-session -t =0 2>/dev/null' 100
 check "restored on start, throwaway session gone" \
-    eq "$(t list-sessions -F '#{session_name}' | sort | tr '\n' ' ')" "misc work "
+    eq "$(t list-sessions -F '#{session_name}' | sort | tr '\n' ' ')" "misc view work "
 CLIENT=$(t list-clients -F '#{client_name}')
 check "client moved to the active session" eq "$(t display -p -c "$CLIENT" '#{client_session}')" "work"
 check "previous session kept for switch-client -l" eq "$(t display -p -c "$CLIENT" '#{client_last_session}')" "misc"
-check "windows" eq "$(t list-windows -t work -F '#{window_index}:#{window_name}' | grep -c .)" "3"
+check "windows" eq "$(t list-windows -t work -F '#{window_index}' | tr '\n' ' ')" "1 2 3 5 "
+check "linked window" eq "$(t display -p -t work:5 '#{window_id}')" "$(t display -p -t misc:1 '#{window_id}')"
+check "grouped session" eq "$(t display -p -t view '#{session_grouped} #{session_windows} #{window_index}')" "1 4 2"
+check "zoom" eq "$(t display -p -t work:3 '#{window_zoomed_flag}')" "1"
 check "window name" eq "$(t display -p -t work:2 '#{window_name}')" "editor"
 check "active window" eq "$(t display -p -t work '#{window_index}')" "1"
 check "last window" eq "$(t list-windows -t work -F '#{window_last_flag}#{window_index}' | grep '^1')" "13"
@@ -207,7 +218,7 @@ check "nothing pending afterwards" eq "$(t show -gqv @vrs-pending-any)" ""
 
 # restoring again does not duplicate sessions
 t run-shell "$VRS restore"
-check "restore skips running sessions" eq "$(t list-sessions | grep -c .)" "2"
+check "restore skips running sessions" eq "$(t list-sessions | grep -c .)" "3"
 
 # saving the restored state: the claude pane points at the same session
 t run-shell "$VRS save"
