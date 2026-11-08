@@ -4,7 +4,7 @@ Save and restore tmux, including what was running in each pane.
 
 vrs saves:
 
-- **sessions, windows and panes**, with window names, layouts and zoom, plus which window and pane were active and which were last
+- **sessions, windows and panes**, with window names, layouts and zoom, plus which window and pane were active and which were last. Grouped sessions and linked windows are kept as they were, not duplicated
 - the **working directory** of every pane
 - the **command running in every pane**
 - the **Claude Code session** open in every pane, matched by its exact session ID
@@ -31,7 +31,7 @@ set -g @plugin 'artischocki/vrs'
 
 Without tpm, clone the repo and add `run-shell /path/to/vrs/vrs.tmux` to `tmux.conf`.
 
-Requirements: tmux ≥ 3.2, python3 (standard library only), Linux (vrs reads `/proc`).
+Requirements: tmux 3.3+ (tested on 3.4), python3 (standard library only), Linux. vrs reads `/proc` to find commands and Claude sessions. Without `/proc` it still restores layouts and directories.
 
 ### Shell integration (recommended)
 
@@ -69,7 +69,7 @@ From the command line:
 ~/.config/tmux/plugins/vrs/scripts/vrs.py restore FILE      # restore an older one
 ```
 
-Snapshots are plain JSON in `~/.local/share/vrs/<socket>/snapshots/`. `last` points to the newest snapshot, and the 100 most recent are kept.
+Snapshots are plain JSON in `~/.local/share/vrs/<socket>/snapshots/`, readable only by you because they contain command lines. `last` points to the newest snapshot, and the 100 most recent are kept.
 
 ## Options
 
