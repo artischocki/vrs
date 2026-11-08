@@ -44,6 +44,7 @@ cleanup() {
     t kill-server 2>/dev/null
     o kill-server 2>/dev/null
     pkill -f "$REPO/tests/fake_claude.py" 2>/dev/null
+    rm -f "${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/$SOCK" "${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/$OUTER"
     rm -rf "$WORK"
 }
 trap cleanup EXIT
