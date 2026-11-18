@@ -925,12 +925,16 @@ def list_sessions():
     return [(r[0], r[1], as_int(r[2])) for r in rows if len(r) == 3]
 
 
-def find_pristine(sessions):
-    """The lone untouched session a fresh server starts with, if that is all there is."""
+def find_pristine(sessions, saved_names=()):
+    """The lone untouched session a fresh server starts with, if that is all there is.
+
+    tmux numbers that session. One started by name (`tmux new-session -A -s main`)
+    counts only if the snapshot has a session of that name to put in its place.
+    """
     if len(sessions) != 1:
         return None
     sid, name, nwin = sessions[0]
-    if nwin != 1 or not name.isdigit():
+    if nwin != 1 or not (name.isdigit() or name in saved_names):
         return None
     panes = tmux_rows("list-panes", "-s", "-t", sid, "-F", fmt("pane_id", "pane_pid"))
     if len(panes) != 1:
@@ -971,7 +975,7 @@ def restore(path=None, auto_start=False):
         try:
             current = list_sessions()
             saved_names = {s["name"] for s in snap["sessions"]}
-            pristine = find_pristine(current)
+            pristine = find_pristine(current, saved_names)
             if pristine and pristine[1] in saved_names:
                 tmux_ok("rename-session", "-t", pristine[0], "vrs-%d" % os.getpid())
                 current = list_sessions()

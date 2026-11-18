@@ -236,6 +236,26 @@ check "autosave picks up changes" test "$(readlink "$SNAP")" != "$BEFORE"
 check "one autosave daemon" eq "$(pgrep -fc "$REPO/scripts/vrs.py daemon")" "1"
 t set -g @vrs-interval 0
 
+# --- 4. a server started by name ---------------------------------------------
+
+# `tmux new-session -A -s work` (a shell rc autostart) creates an empty "work"
+# before vrs runs; the saved "work" has to take its place
+t run-shell "$VRS save"
+WINDOWS=$(t list-windows -t work -F '#{window_index}' | tr '\n' ' ')
+t kill-server
+wait_for '! o has-session 2>/dev/null' 30
+o kill-server 2>/dev/null
+pkill -f "$REPO/tests/fake_claude.py" 2>/dev/null
+sleep 0.5
+o new-session -d -s outer -x 160 -y 42 "env -u TMUX tmux -L $SOCK -f $WORK/tmux.conf new-session -A -s work"
+wait_for 't has-session -t misc 2>/dev/null && ! t list-sessions -F "#{session_name}" | grep -q "^vrs-"' 100
+check "named start session replaced by the saved one" \
+    eq "$(t list-windows -t work -F '#{window_index}' | tr '\n' ' ')" "$WINDOWS"
+check "no session left over" \
+    eq "$(t list-sessions -F '#{session_name}' | sort | tr '\n' ' ')" "misc view work "
+check "client moved to the active session again" \
+    eq "$(t display -p -c "$(t list-clients -F '#{client_name}')" '#{client_session}')" "misc"
+
 echo
 echo "$PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]]

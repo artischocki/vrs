@@ -58,7 +58,7 @@ On each command, the hook writes the command line to a small file in `$XDG_RUNTI
 Saving and restoring also happen on their own:
 
 - **autosave** every 5 minutes, and whenever a client detaches. A snapshot is only written if something changed.
-- **restore on start**: when the tmux server starts, vrs restores the latest snapshot. The empty session tmux started with is closed, and your client moves to the session you were in before.
+- **restore on start**: when the tmux server starts, vrs restores the latest snapshot. The empty session tmux started with is closed, and your client moves to the session you were in before. If you start tmux by name (`tmux new-session -A -s main`), the empty `main` is replaced by the saved `main`.
 
 Restoring never touches sessions that already exist. Sessions with the same name are skipped, so pressing `prefix + C-r` twice does no harm.
 
